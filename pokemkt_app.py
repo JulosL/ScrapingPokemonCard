@@ -28,6 +28,7 @@ import csv
 import time
 import json
 import string
+import importlib
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -57,6 +58,24 @@ def _patch_psg_aliases():
     """Expose common element constructors on top-level PySimpleGUI module."""
 
     port_candidates = []
+
+    # First include known submodules from different distribution layouts.
+    for module_name in (
+        "PySimpleGUI.PySimpleGUI",
+        "PySimpleGUI.PySimpleGUI27",
+        "PySimpleGUI.PySimpleGUIQt",
+        "PySimpleGUI.PySimpleGUIWx",
+        "PySimpleGUI.PySimpleGUIWeb",
+    ):
+        try:
+            port_candidates.append(importlib.import_module(module_name))
+        except ModuleNotFoundError:
+            continue
+        except Exception:
+            # Some exotic ports import optional dependencies; ignore failures.
+            continue
+
+    # Add any port references already exposed on the top-level module.
     for attr in ("tksg", "tk", "Tk", "PySimpleGUI", "tkinter"):
         candidate = getattr(sg, attr, None)
         if candidate is not None:
@@ -99,6 +118,8 @@ def _patch_psg_aliases():
 
 
 _patch_psg_aliases()
+
+
 
 
 @dataclass
