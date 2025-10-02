@@ -53,6 +53,54 @@ USER_AGENT = (
 
 REQUESTS_TIMEOUT = 25
 
+def _patch_psg_aliases():
+    """Expose common element constructors on top-level PySimpleGUI module."""
+
+    port_candidates = []
+    for attr in ("tksg", "tk", "Tk", "PySimpleGUI", "tkinter"):
+        candidate = getattr(sg, attr, None)
+        if candidate is not None:
+            port_candidates.append(candidate)
+
+    def _attr_from_ports(name: str):
+        for candidate in port_candidates:
+            value = getattr(candidate, name, None)
+            if value is not None:
+                return value
+        return None
+
+    element_names = (
+        "Text",
+        "Multiline",
+        "Button",
+        "Table",
+        "Output",
+        "Window",
+        "Column",
+        "Frame",
+    )
+
+    for name in element_names:
+        if getattr(sg, name, None) is None:
+            value = _attr_from_ports(name)
+            if value is not None:
+                setattr(sg, name, value)
+
+    if getattr(sg, "WINDOW_CLOSED", None) is None:
+        value = _attr_from_ports("WINDOW_CLOSED")
+        if value is not None:
+            setattr(sg, "WINDOW_CLOSED", value)
+
+    for name in ("theme", "SetOptions", "set_options"):
+        if getattr(sg, name, None) is None:
+            value = _attr_from_ports(name)
+            if value is not None:
+                setattr(sg, name, value)
+
+
+_patch_psg_aliases()
+
+
 @dataclass
 class CardRow:
     title: str
