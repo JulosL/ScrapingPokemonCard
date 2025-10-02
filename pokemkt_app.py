@@ -29,11 +29,14 @@ import time
 import json
 import string
 import importlib
+import pkgutil
+import sys
+import types
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
 import requests
-import PySimpleGUI as sg
+import PySimpleGUI as _psg_base
 import pandas as pd
 import matplotlib.pyplot as plt
 from bs4 import BeautifulSoup
@@ -54,12 +57,20 @@ USER_AGENT = (
 
 REQUESTS_TIMEOUT = 25
 
-def _patch_psg_aliases():
-    """Expose common element constructors on top-level PySimpleGUI module."""
+def _ensure_psg_elements(base_module: types.ModuleType) -> types.ModuleType:
+    """Ensure the provided PySimpleGUI module exposes required UI helpers."""
 
-    port_candidates = []
+    required_elements = ("Text", "Button", "Window")
 
-    # First include known submodules from different distribution layouts.
+    def _has_required(module: types.ModuleType) -> bool:
+        return all(getattr(module, name, None) is not None for name in required_elements)
+
+    if _has_required(base_module):
+        return base_module
+
+    port_candidates: list[types.ModuleType] = []
+
+    # Known submodules across historic and modern packaging layouts.
     for module_name in (
         "PySimpleGUI.PySimpleGUI",
         "PySimpleGUI.PySimpleGUI27",
@@ -72,52 +83,72 @@ def _patch_psg_aliases():
         except ModuleNotFoundError:
             continue
         except Exception:
-            # Some exotic ports import optional dependencies; ignore failures.
             continue
 
-    # Add any port references already exposed on the top-level module.
+    # Include any bundled submodules discoverable via the package path.
+    package_path = getattr(base_module, "__path__", None)
+    if package_path:
+        for mod_info in pkgutil.walk_packages(package_path, base_module.__name__ + "."):
+            try:
+                port_candidates.append(importlib.import_module(mod_info.name))
+            except ModuleNotFoundError:
+                continue
+            except Exception:
+                continue
+
+    # Gather already imported PySimpleGUI modules.
+    for module in list(sys.modules.values()):
+        if isinstance(module, types.ModuleType) and module.__name__.startswith("PySimpleGUI"):
+            port_candidates.append(module)
+
+    # Add any explicit attributes that may reference port implementations.
     for attr in ("tksg", "tk", "Tk", "PySimpleGUI", "tkinter"):
-        candidate = getattr(sg, attr, None)
-        if candidate is not None:
+        candidate = getattr(base_module, attr, None)
+        if isinstance(candidate, types.ModuleType):
             port_candidates.append(candidate)
 
-    def _attr_from_ports(name: str):
-        for candidate in port_candidates:
-            value = getattr(candidate, name, None)
-            if value is not None:
-                return value
-        return None
+    seen: set[int] = set()
+    for candidate in port_candidates:
+        if not isinstance(candidate, types.ModuleType):
+            continue
+        key = id(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
 
-    element_names = (
-        "Text",
-        "Multiline",
-        "Button",
-        "Table",
-        "Output",
-        "Window",
-        "Column",
-        "Frame",
+        if not _has_required(candidate):
+            continue
+
+        # Copy missing helpers onto the base module.
+        for name in (
+            "Text",
+            "Multiline",
+            "Button",
+            "Table",
+            "Output",
+            "Window",
+            "Column",
+            "Frame",
+            "theme",
+            "SetOptions",
+            "set_options",
+            "WINDOW_CLOSED",
+            "LOOK_AND_FEEL_TABLE",
+        ):
+            if getattr(base_module, name, None) is None and hasattr(candidate, name):
+                setattr(base_module, name, getattr(candidate, name))
+
+        if _has_required(base_module):
+            return base_module
+
+    raise AttributeError(
+        "PySimpleGUI installation is missing required UI elements. "
+        "Please verify the package is correctly installed."
     )
 
-    for name in element_names:
-        if getattr(sg, name, None) is None:
-            value = _attr_from_ports(name)
-            if value is not None:
-                setattr(sg, name, value)
 
-    if getattr(sg, "WINDOW_CLOSED", None) is None:
-        value = _attr_from_ports("WINDOW_CLOSED")
-        if value is not None:
-            setattr(sg, "WINDOW_CLOSED", value)
+sg = _ensure_psg_elements(_psg_base)
 
-    for name in ("theme", "SetOptions", "set_options"):
-        if getattr(sg, name, None) is None:
-            value = _attr_from_ports(name)
-            if value is not None:
-                setattr(sg, name, value)
-
-
-_patch_psg_aliases()
 
 
 
