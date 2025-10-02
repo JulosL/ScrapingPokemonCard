@@ -116,10 +116,32 @@ def save_image(url: str, dest: Path) -> bool:
         return False
 
 def safe_theme(theme_name="LightBlue2"):
-    if hasattr(sg, "theme"):
-        sg.theme(theme_name)
-    else:
-        sg.change_look_and_feel(theme_name)
+    """Set the PySimpleGUI theme safely across library versions."""
+
+    # Modern API (PySimpleGUI >= 4.19)
+    theme_func = getattr(sg, "theme", None)
+    if callable(theme_func):
+        try:
+            theme_func(theme_name)
+            return
+        except Exception:
+            pass
+
+    # Legacy APIs (older PySimpleGUI releases)
+    for legacy_name in ("change_look_and_feel", "ChangeLookAndFeel"):
+        legacy_func = getattr(sg, legacy_name, None)
+        if callable(legacy_func):
+            try:
+                legacy_func(theme_name)
+                return
+            except Exception:
+                continue
+
+    # Fallback: apply options manually from the look & feel table when available.
+    look_and_feel_table = getattr(sg, "LOOK_AND_FEEL_TABLE", {})
+    theme_options = look_and_feel_table.get(theme_name)
+    if theme_options and hasattr(sg, "SetOptions"):
+        sg.SetOptions(**theme_options)
 
 # --------------------------- CardMarket scraping --------------------------
 CM_HEADERS = {"User-Agent": USER_AGENT}
@@ -355,7 +377,7 @@ HELP_TEXT = (
 
 def run_ui():
     ensure_dirs()
-    sg.theme("LightBlue2")
+    safe_theme("LightBlue2")
 
     layout = [
         [sg.Text(APP_NAME, font=("Segoe UI", 14, "bold"))],
