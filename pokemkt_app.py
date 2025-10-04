@@ -32,6 +32,7 @@ import importlib
 import pkgutil
 import sys
 import types
+from collections import deque
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -61,6 +62,18 @@ def _ensure_psg_elements(base_module: types.ModuleType) -> types.ModuleType:
     """Ensure the provided PySimpleGUI module exposes required UI helpers."""
 
     required_elements = ("Text", "Button", "Window")
+    optional_elements = (
+        "Multiline",
+        "Table",
+        "Output",
+        "Column",
+        "Frame",
+        "theme",
+        "SetOptions",
+        "set_options",
+        "WINDOW_CLOSED",
+        "LOOK_AND_FEEL_TABLE",
+    )
 
     def _has_required(module: types.ModuleType) -> bool:
         return all(getattr(module, name, None) is not None for name in required_elements)
@@ -68,83 +81,103 @@ def _ensure_psg_elements(base_module: types.ModuleType) -> types.ModuleType:
     if _has_required(base_module):
         return base_module
 
-    port_candidates: list[types.ModuleType] = []
+    def _gather_from_modules(modules: list[types.ModuleType]) -> dict[str, object]:
+        """Inspect modules breadth-first to locate required UI helpers."""
 
-    # Known submodules across historic and modern packaging layouts.
-    for module_name in (
-        "PySimpleGUI.PySimpleGUI",
-        "PySimpleGUI.PySimpleGUI27",
-        "PySimpleGUI.PySimpleGUIQt",
-        "PySimpleGUI.PySimpleGUIWx",
-        "PySimpleGUI.PySimpleGUIWeb",
-    ):
-        try:
-            port_candidates.append(importlib.import_module(module_name))
-        except ModuleNotFoundError:
-            continue
-        except Exception:
-            continue
+        found: dict[str, object] = {}
+        visited: set[int] = set()
+        queue: deque[types.ModuleType] = deque(modules)
 
-    # Include any bundled submodules discoverable via the package path.
-    package_path = getattr(base_module, "__path__", None)
-    if package_path:
-        for mod_info in pkgutil.walk_packages(package_path, base_module.__name__ + "."):
+        def _record_from(module: types.ModuleType) -> None:
+            for name in (*required_elements, *optional_elements):
+                if name in found:
+                    continue
+                try:
+                    attr = getattr(module, name)
+                except AttributeError:
+                    continue
+                except Exception:
+                    continue
+                if attr is not None:
+                    found[name] = attr
+
+        while queue and len(found) < len(required_elements) + len(optional_elements):
+            module = queue.popleft()
+            if not isinstance(module, types.ModuleType):
+                continue
+            module_id = id(module)
+            if module_id in visited:
+                continue
+            visited.add(module_id)
+
+            _record_from(module)
+            if all(name in found for name in required_elements):
+                break
+
+            for attr_name in dir(module):
+                if attr_name.startswith("_"):
+                    continue
+                try:
+                    candidate = getattr(module, attr_name)
+                except AttributeError:
+                    continue
+                except Exception:
+                    continue
+                if isinstance(candidate, types.ModuleType):
+                    queue.append(candidate)
+
+        return found
+
+    # First search through already imported modules related to PySimpleGUI.
+    initial_modules: list[types.ModuleType] = [base_module]
+    for module in list(sys.modules.values()):
+        if isinstance(module, types.ModuleType) and module.__name__.startswith("PySimpleGUI"):
+            initial_modules.append(module)
+
+    found_elements = _gather_from_modules(initial_modules)
+
+    # If still missing, attempt to import known port modules and walk the package.
+    if not all(name in found_elements for name in required_elements):
+        port_module_names = (
+            "PySimpleGUI.PySimpleGUI",
+            "PySimpleGUI.PySimpleGUI27",
+            "PySimpleGUI.PySimpleGUIQt",
+            "PySimpleGUI.PySimpleGUIWx",
+            "PySimpleGUI.PySimpleGUIWeb",
+        )
+        extra_modules: list[types.ModuleType] = []
+        for module_name in port_module_names:
             try:
-                port_candidates.append(importlib.import_module(mod_info.name))
+                extra_modules.append(importlib.import_module(module_name))
             except ModuleNotFoundError:
                 continue
             except Exception:
                 continue
 
-    # Gather already imported PySimpleGUI modules.
-    for module in list(sys.modules.values()):
-        if isinstance(module, types.ModuleType) and module.__name__.startswith("PySimpleGUI"):
-            port_candidates.append(module)
+        package_path = getattr(base_module, "__path__", None)
+        if package_path:
+            for mod_info in pkgutil.walk_packages(package_path, base_module.__name__ + "."):
+                try:
+                    extra_modules.append(importlib.import_module(mod_info.name))
+                except ModuleNotFoundError:
+                    continue
+                except Exception:
+                    continue
 
-    # Add any explicit attributes that may reference port implementations.
-    for attr in ("tksg", "tk", "Tk", "PySimpleGUI", "tkinter"):
-        candidate = getattr(base_module, attr, None)
-        if isinstance(candidate, types.ModuleType):
-            port_candidates.append(candidate)
+        if extra_modules:
+            found_elements.update(_gather_from_modules(extra_modules))
 
-    seen: set[int] = set()
-    for candidate in port_candidates:
-        if not isinstance(candidate, types.ModuleType):
-            continue
-        key = id(candidate)
-        if key in seen:
-            continue
-        seen.add(key)
+    if not all(name in found_elements for name in required_elements):
+        raise AttributeError(
+            "PySimpleGUI installation is missing required UI elements. "
+            "Please verify the package is correctly installed."
+        )
 
-        if not _has_required(candidate):
-            continue
+    for name, value in found_elements.items():
+        if getattr(base_module, name, None) is None:
+            setattr(base_module, name, value)
 
-        # Copy missing helpers onto the base module.
-        for name in (
-            "Text",
-            "Multiline",
-            "Button",
-            "Table",
-            "Output",
-            "Window",
-            "Column",
-            "Frame",
-            "theme",
-            "SetOptions",
-            "set_options",
-            "WINDOW_CLOSED",
-            "LOOK_AND_FEEL_TABLE",
-        ):
-            if getattr(base_module, name, None) is None and hasattr(candidate, name):
-                setattr(base_module, name, getattr(candidate, name))
-
-        if _has_required(base_module):
-            return base_module
-
-    raise AttributeError(
-        "PySimpleGUI installation is missing required UI elements. "
-        "Please verify the package is correctly installed."
-    )
+    return base_module
 
 
 sg = _ensure_psg_elements(_psg_base)
